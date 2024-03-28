@@ -16,6 +16,9 @@ import base64
 import httpx
 from io import BytesIO
 from PIL import Image
+from dotenv import load_dotenv, dotenv_values
+# loading variables from .env file
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
