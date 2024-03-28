@@ -88,7 +88,7 @@ ai_client = Anthropic(api_key=api_key)
 thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 
-def get_channel_history(channel_id, limit=50):
+def get_channel_history(channel_id, limit=5):
     try:
         # Fetch the latest 'limit' posts from the channel
         posts = driver.posts.get_posts_for_channel(channel_id, params={'per_page': limit, 'page': 0})
@@ -286,8 +286,10 @@ def handle_text_generation(
         last_message, messages, channel_id, root_id, sender_name, links
 ):
     pdf_files_provided = any(
-        isinstance(msg, dict) and msg.get("type") == "text" and "This is PDF named" in msg.get("text", "")
+        "This is PDF named" in msg_text
         for msg in messages
+        for content in msg.get("content", [])
+        for key, msg_text in content.items() if key == 'text'
     )
     # Modify the system instructions based on whether PDF files were provided or not
     if pdf_files_provided:
@@ -515,6 +517,7 @@ async def message_handler(event):
 
                         if file_messages:
                             messages.append({"role": "user", "content": file_messages})
+                            logger.info(f"Sending file messages to AI: {file_messages}")
                     else:
                         logger.info("No file_ids found in the post")
                     links = re.findall(
