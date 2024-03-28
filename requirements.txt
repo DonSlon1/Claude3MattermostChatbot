@@ -5,3 +5,4 @@ beautifulsoup4
 pillow
 httpx
 python-dotenv
+pdf2image

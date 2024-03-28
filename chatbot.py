@@ -16,7 +16,9 @@ import base64
 import httpx
 from io import BytesIO
 from PIL import Image
+from pdf_processing import process_pdf
 from dotenv import load_dotenv, dotenv_values
+
 # loading variables from .env file
 load_dotenv()
 
@@ -86,8 +88,8 @@ thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 def get_system_instructions():
     current_time = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S.%f")[
-        :-3
-    ]
+                   :-3
+                   ]
     return (f"You are a helpful assistant. The current UTC time is {current_time}. Whenever users asks you for help "
             f"you will provide them with succinct answers formatted using Markdown; do not unnecessarily greet people "
             f"with their name. Do not be apologetic. You know the user's name as it is provided within [CONTEXT, "
@@ -237,7 +239,7 @@ def split_message(msg, max_length=4000):
 
 
 def handle_text_generation(
-    last_message, messages, channel_id, root_id, sender_name, links
+        last_message, messages, channel_id, root_id, sender_name, links
 ):
     # Send the messages to the AI API
     response = ai_client.messages.create(
@@ -313,8 +315,8 @@ async def message_handler(event):
             post = json.loads(event_data["data"]["post"])
             sender_id = post["user_id"]
             if (
-                sender_id == driver.client.userid
-                or sender_id == mattermost_ignore_sender_id
+                    sender_id == driver.client.userid
+                    or sender_id == mattermost_ignore_sender_id
             ):
                 logging.info("Ignoring post from a ignored sender ID")
                 return
@@ -374,41 +376,44 @@ async def message_handler(event):
                 # Add the current message to the messages array if "@chatbot" is mentioned, the chatbot has already
                 # been invoked in the thread or it's a DM
                 if (
-                    chatbot_usernameAt in post["message"]
-                    or chatbot_invoked
-                    or channel_display_name.startswith("@")
+                        chatbot_usernameAt in post["message"]
+                        or chatbot_invoked
+                        or channel_display_name.startswith("@")
                 ):
                     if "file_ids" in post:
-                        # Process the images
                         file_ids = post["file_ids"]
-                        logger.info(f"Found image file_ids: {file_ids}")  # Log the file_ids for debugging
-                        image_messages = []
+                        logger.info(f"Found file_ids: {file_ids}")
+                        file_messages = []
                         for file_id in file_ids:
                             try:
-                                # Download the image using Mattermost API
                                 file_info = driver.files.get_file(file_id)
+                                logger.info(f"Processing file: {file_info.headers['Content-Disposition']}")
 
-                                # Convert the image to base64
-                                image_base64 = base64.b64encode(file_info.content).decode("utf-8")
+                                if file_info.headers['Content-Type'] == 'application/pdf':
+                                    pdf_messages = process_pdf(file_info)
+                                    if pdf_messages:
+                                        file_messages.extend(pdf_messages)
+                                elif file_info.headers['Content-Type'].startswith('image/'):
+                                    image_base64 = base64.b64encode(file_info.content).decode("utf-8")
+                                    file_messages.append({
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": file_info.headers['Content-Type'],
+                                            "data": image_base64,
+                                        },
+                                    })
+                                else:
+                                    logger.info(f"Unsupported file type: {file_info.headers['Content-Type']}")
 
-                                # Add the image to the list of image messages
-                                image_messages.append({
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type":file_info.headers['Content-Type'],  # Update this to 'mime_type'
-                                        "data": image_base64,
-                                    },
-                                })
                             except Exception as e:
-                                logging.error(f"Error processing image: {str(e)} {traceback.format_exc()}")
+                                logging.error(f"Error processing file: {str(e)} {traceback.format_exc()}")
 
-                        if image_messages:
-                            messages.append({"role": "user", "content": image_messages})
-                            # Log the structure of the message being sent to AI for debugging
-                            logger.info(f"Sending image messages to AI: {image_messages}")
+                        if file_messages:
+                            messages.append({"role": "user", "content": file_messages})
+                            logger.info(f"Sending file messages to AI: {file_messages}")
                     else:
-                        logger.info("No image file_ids found in the post")
+                        logger.info("No file_ids found in the post")
                     links = re.findall(
                         r"(https?://\S+)", message
                     )  # Allow both http and https links
@@ -417,6 +422,7 @@ async def message_handler(event):
                     extracted_text = ""
                     total_size = 0
                     image_messages = []
+                    file_messages = []
 
                     with httpx.Client() as client:
                         for link in links:
@@ -424,21 +430,33 @@ async def message_handler(event):
                                 logging.info(f"Skipping local URL: {link}")
                                 continue
                             try:
-                                with client.stream(
-                                    "GET", link, timeout=4, follow_redirects=True
-                                ) as response:
+                                with client.stream("GET", link, timeout=4, follow_redirects=True) as response:
                                     final_url = str(response.url)
 
                                     if re.search(regex_local_links, final_url):
-                                        logging.info(
-                                            f"Skipping local URL after redirection: {final_url}"
-                                        )
+                                        logging.info(f"Skipping local URL after redirection: {final_url}")
                                         continue
 
-                                    content_type = response.headers.get(
-                                        "content-type", ""
-                                    ).lower()
-                                    if "image" in content_type:
+                                    content_type = response.headers.get("content-type", "").lower()
+                                    if content_type == "application/pdf":
+                                        try:
+                                            pdf_content = BytesIO()
+                                            for chunk in response.iter_bytes():
+                                                pdf_content.write(chunk)
+                                                total_size += len(chunk)
+                                                if total_size > max_response_size:
+                                                    extracted_text += "*WEBSITE SIZE EXCEEDED THE MAXIMUM LIMIT FOR THE CHATBOT, WARN THE CHATBOT USER*"
+                                                    raise Exception("Response size exceeds the maximum limit")
+                                            pdf_messages = process_pdf(pdf_content)
+                                            if pdf_messages:
+                                                file_messages.extend(pdf_messages)
+                                        except Exception as e:
+                                            logging.error(
+                                                f"Error processing PDF from link {link}: {str(e)} {traceback.format_exc()}")
+                                            file_messages.append({"type": "text",
+                                                                  "text": f"The provided link {link} does not lead to a valid PDF file."})
+
+                                    elif "image" in content_type:
                                         # Check for compatible content types
                                         compatible_content_types = [
                                             "image/jpeg",
@@ -560,9 +578,10 @@ async def message_handler(event):
                         content += f", extracted_website_text:{extracted_text}"
                     content += f"] {message}"
 
-                    if image_messages:
-                        image_messages.append({"type": "text", "text": content})
-                        messages.append({"role": "user", "content": image_messages})
+                    all_messages = image_messages + file_messages
+                    if all_messages:
+                        all_messages.append({"type": "text", "text": content})
+                        messages.append({"role": "user", "content": all_messages})
                     else:
                         messages.append(
                             {
