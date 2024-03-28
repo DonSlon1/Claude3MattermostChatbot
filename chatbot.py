@@ -1,23 +1,25 @@
-import time
-from mattermostdriver.driver import Driver
-import ssl
-import certifi
-import traceback
-import json
-import os
-import threading
-import re
-import datetime
-import logging
-from bs4 import BeautifulSoup
-from anthropic import Anthropic
-import concurrent.futures
 import base64
-import httpx
+import concurrent.futures
+import datetime
+import json
+import logging
+import os
+import re
+import ssl
+import threading
+import time
+import traceback
 from io import BytesIO
+
+import certifi
+import httpx
 from PIL import Image
+from anthropic import Anthropic
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+from mattermostdriver.driver import Driver
+
 from pdf_processing import process_pdf
-from dotenv import load_dotenv, dotenv_values
 
 # loading variables from .env file
 load_dotenv()
@@ -94,6 +96,30 @@ def get_channel_history(channel_id, limit=50):
     except Exception as e:
         logging.error(f"Error retrieving channel history: {str(e)} {traceback.format_exc()}")
         return []
+
+
+def limit_images(messages, image_limit=20):
+    image_count = 0
+    limited_messages = []
+
+    # Loop through each message and its content
+    for message in messages:
+        new_content = []
+        for content in message['content']:
+            # If content is an image, increment the count and check the limit
+            if content['type'] == 'image':
+                if image_count >= image_limit:
+                    continue  # Skip if the image limit is reached
+                image_count += 1
+
+            # Add text or image to the new content, only if limit not hit
+            new_content.append(content)
+
+        # Replace old content with limited content
+        message['content'] = new_content
+        limited_messages.append(message)
+
+    return limited_messages
 
 
 def get_system_instructions():
@@ -493,7 +519,8 @@ async def message_handler(event):
                                                 pdf_content.write(chunk)
                                                 total_size += len(chunk)
                                                 if total_size > max_response_size:
-                                                    extracted_text += "*WEBSITE SIZE EXCEEDED THE MAXIMUM LIMIT FOR THE CHATBOT, WARN THE CHATBOT USER*"
+                                                    extracted_text += ("*WEBSITE SIZE EXCEEDED THE MAXIMUM LIMIT FOR "
+                                                                       "THE CHATBOT, WARN THE CHATBOT USER*")
                                                     raise Exception("Response size exceeds the maximum limit")
                                             pdf_messages = process_pdf(pdf_content)
                                             if pdf_messages:
@@ -502,7 +529,8 @@ async def message_handler(event):
                                             logging.error(
                                                 f"Error processing PDF from link {link}: {str(e)} {traceback.format_exc()}")
                                             file_messages.append({"type": "text",
-                                                                  "text": f"The provided link {link} does not lead to a valid PDF file."})
+                                                                  "text": f"The provided link {link} does not lead to "
+                                                                          f"a valid PDF file."})
 
                                     elif "image" in content_type:
                                         # Check for compatible content types
@@ -523,7 +551,8 @@ async def message_handler(event):
                                             image_data += chunk
                                             total_size += len(chunk)
                                             if total_size > max_response_size:
-                                                extracted_text += "*WEBSITE SIZE EXCEEDED THE MAXIMUM LIMIT FOR THE CHATBOT, WARN THE CHATBOT USER*"
+                                                extracted_text += ("*WEBSITE SIZE EXCEEDED THE MAXIMUM LIMIT FOR THE "
+                                                                   "CHATBOT, WARN THE CHATBOT USER*")
                                                 raise Exception(
                                                     "Response size exceeds the maximum limit at image processing"
                                                 )
@@ -609,7 +638,8 @@ async def message_handler(event):
                                             content_chunks.append(chunk)
                                             total_size += len(chunk)
                                             if total_size > max_response_size:
-                                                extracted_text += "*WEBSITE SIZE EXCEEDED THE MAXIMUM LIMIT FOR THE CHATBOT, WARN THE CHATBOT USER*"
+                                                extracted_text += ("*WEBSITE SIZE EXCEEDED THE MAXIMUM LIMIT FOR THE "
+                                                                   "CHATBOT, WARN THE CHATBOT USER*")
                                                 raise Exception(
                                                     "Response size exceeds the maximum limit"
                                                 )
@@ -640,6 +670,7 @@ async def message_handler(event):
 
                     # Ensure alternating roles in the messages array
                     messages = ensure_alternating_roles(messages)
+                    messages = limit_images(messages)
 
                     # Submit the task to the thread pool. We do this because Mattermostdriver-async is outdated
                     thread_pool.submit(
