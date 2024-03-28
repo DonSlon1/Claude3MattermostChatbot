@@ -6,3 +6,4 @@ pillow
 httpx
 python-dotenv
 pdf2image
+RestrictedPython
