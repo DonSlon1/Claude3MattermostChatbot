@@ -86,6 +86,16 @@ ai_client = Anthropic(api_key=api_key)
 thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 
+def get_channel_history(channel_id, limit=50):
+    try:
+        # Fetch the latest 'limit' posts from the channel
+        posts = driver.posts.get_posts_for_channel(channel_id, params={'per_page': limit, 'page': 0})
+        return sorted(posts['posts'].values(), key=lambda post: post['create_at'])
+    except Exception as e:
+        logging.error(f"Error retrieving channel history: {str(e)} {traceback.format_exc()}")
+        return []
+
+
 def get_system_instructions():
     current_time = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S.%f")[
                    :-3
@@ -312,6 +322,7 @@ async def message_handler(event):
         if event_data.get("event") == "hello":
             logging.info("Received 'hello' event. WebSocket connection established.")
         elif event_data.get("event") == "posted":
+
             post = json.loads(event_data["data"]["post"])
             sender_id = post["user_id"]
             if (
@@ -335,8 +346,37 @@ async def message_handler(event):
             channel_display_name = event_data["data"]["channel_display_name"]
 
             try:
-                # Retrieve the thread context
+                # Define the messages list outside the if-else
                 messages = []
+                thread_files = []
+
+                # Retrieve the channel context
+                channel_id = post["channel_id"]
+                channel_posts = get_channel_history(channel_id)  # Change limit as needed
+                for channel_post in channel_posts:
+                    sender_name = sanitize_username(get_username_from_user_id(channel_post["user_id"]))
+                    message_content = channel_post["message"]
+                    # Check for files in each post
+                    file_messages = get_message_files(channel_post)  # Using the previously defined function
+                    role = "assistant" if channel_post["user_id"] == driver.client.userid else "user"
+
+                    # Compose the message object
+                    message_obj = {
+                        "role": role,
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"[CONTEXT, from:{sender_name}] {message_content}",
+                            }
+                        ],
+                    }
+
+                    # Append file messages if there are any
+                    if file_messages:
+                        message_obj["content"].extend(file_messages)
+
+                    messages.append(message_obj)
+                # Retrieve the thread context
                 thread_files = []  # to hold files from thread history
                 chatbot_invoked = False
                 if root_id:
