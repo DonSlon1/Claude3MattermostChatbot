@@ -88,7 +88,12 @@ def get_system_instructions():
     current_time = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S.%f")[
         :-3
     ]
-    return f"You are a helpful assistant. The current UTC time is {current_time}. Whenever users asks you for help you will provide them with succinct answers formatted using Markdown; do not unnecessarily greet people with their name. Do not be apologetic. You know the user's name as it is provided within [CONTEXT, from:username] bracket at the beginning of a user-role message. Never add any CONTEXT bracket to your replies (eg. [CONTEXT, from:{chatbot_username}]). The CONTEXT bracket may also include grabbed text from a website if a user adds a link to his question."
+    return (f"You are a helpful assistant. The current UTC time is {current_time}. Whenever users asks you for help "
+            f"you will provide them with succinct answers formatted using Markdown; do not unnecessarily greet people "
+            f"with their name. Do not be apologetic. You know the user's name as it is provided within [CONTEXT, "
+            f"from:username] bracket at the beginning of a user-role message. Never add any CONTEXT bracket to your "
+            f"replies (eg. [CONTEXT, from:{chatbot_username}]). The CONTEXT bracket may also include grabbed text "
+            f"from a website if a user adds a link to his question.")
 
 
 def sanitize_username(username):
@@ -366,15 +371,49 @@ async def message_handler(event):
                     # If the message is not part of a thread, reply to it to create a new thread
                     root_id = post["id"]
 
-                # Add the current message to the messages array if "@chatbot" is mentioned, the chatbot has already been invoked in the thread or its a DM
+                # Add the current message to the messages array if "@chatbot" is mentioned, the chatbot has already
+                # been invoked in the thread or it's a DM
                 if (
                     chatbot_usernameAt in post["message"]
                     or chatbot_invoked
                     or channel_display_name.startswith("@")
                 ):
+                    if "file_ids" in post:
+                        # Process the images
+                        file_ids = post["file_ids"]
+                        logger.info(f"Found image file_ids: {file_ids}")  # Log the file_ids for debugging
+                        image_messages = []
+                        for file_id in file_ids:
+                            try:
+                                # Download the image using Mattermost API
+                                file_info = driver.files.get_file(file_id)
+
+                                # Convert the image to base64
+                                image_base64 = base64.b64encode(file_info.content).decode("utf-8")
+
+                                # Add the image to the list of image messages
+                                image_messages.append({
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type":file_info.headers['Content-Type'],  # Update this to 'mime_type'
+                                        "data": image_base64,
+                                    },
+                                })
+                            except Exception as e:
+                                logging.error(f"Error processing image: {str(e)} {traceback.format_exc()}")
+
+                        if image_messages:
+                            messages.append({"role": "user", "content": image_messages})
+                            # Log the structure of the message being sent to AI for debugging
+                            logger.info(f"Sending image messages to AI: {image_messages}")
+                    else:
+                        logger.info("No image file_ids found in the post")
                     links = re.findall(
                         r"(https?://\S+)", message
                     )  # Allow both http and https links
+                    # add images to links
+
                     extracted_text = ""
                     total_size = 0
                     image_messages = []
