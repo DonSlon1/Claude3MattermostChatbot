@@ -337,6 +337,7 @@ async def message_handler(event):
             try:
                 # Retrieve the thread context
                 messages = []
+                thread_files = []  # to hold files from thread history
                 chatbot_invoked = False
                 if root_id:
                     thread = driver.posts.get_thread(root_id)
@@ -355,6 +356,10 @@ async def message_handler(event):
                                 if thread_post["user_id"] == driver.client.userid
                                 else "user"
                             )
+
+                            # Add message files to the history
+                            thread_files.extend(get_message_files(thread_post))
+
                             messages.append(
                                 {
                                     "role": role,
@@ -372,6 +377,9 @@ async def message_handler(event):
                 else:
                     # If the message is not part of a thread, reply to it to create a new thread
                     root_id = post["id"]
+
+                if thread_files:
+                    messages.append({"role": "user", "content": thread_files})
 
                 # Add the current message to the messages array if "@chatbot" is mentioned, the chatbot has already
                 # been invoked in the thread or it's a DM
@@ -643,6 +651,30 @@ def main():
         driver.logout()
     except Exception as e:
         logging.error(f"Error: {str(e)} {traceback.format_exc()}")
+
+
+def get_message_files(thread_post):
+    file_messages = []
+    if "file_ids" in thread_post and thread_post["file_ids"]:
+        file_ids = thread_post["file_ids"]
+        for file_id in file_ids:
+            file_info = driver.files.get_file(file_id)
+            content_type = file_info.headers['Content-Type']
+            if content_type.startswith('image/'):
+                image_base64 = base64.b64encode(file_info.content).decode("utf-8")
+                file_messages.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": content_type,
+                        "data": image_base64,
+                    },
+                })
+            elif content_type == 'application/pdf':
+                pdf_messages = process_pdf(BytesIO(file_info.content))
+                if pdf_messages:
+                    file_messages.extend(pdf_messages)
+    return file_messages
 
 
 if __name__ == "__main__":
