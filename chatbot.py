@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 from io import BytesIO
-
+from urllib.parse import urlparse
 import certifi
 import httpx
 from PIL import Image
@@ -126,12 +126,20 @@ def get_system_instructions():
     current_time = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S.%f")[
                    :-3
                    ]
-    return (f"You are a helpful assistant. The current UTC time is {current_time}. Whenever users asks you for help "
-            f"you will provide them with succinct answers formatted using Markdown; do not unnecessarily greet people "
-            f"with their name. Do not be apologetic. You know the user's name as it is provided within [CONTEXT, "
-            f"from:username] bracket at the beginning of a user-role message. Never add any CONTEXT bracket to your "
-            f"replies (eg. [CONTEXT, from:{chatbot_username}]). The CONTEXT bracket may also include grabbed text "
-            f"from a website if a user adds a link to his question.")
+    return (
+        f"You are a helpful assistant. The current UTC time is {current_time}. Whenever users ask you for help, "
+        f"you will provide them with succinct answers formatted using Markdown; do not unnecessarily greet people "
+        f"with their name. Do not be apologetic. You know the user's name as it is provided within [CONTEXT, "
+        f"from:username] bracket at the beginning of a user-role message. Never add any CONTEXT bracket to your "
+        f"replies (eg. [CONTEXT, from:{chatbot_username}]). The CONTEXT bracket may also include grabbed text "
+        f"from a website if a user adds a link to their question.\n\n"
+        f"When a user sends a PDF file, the file will be processed and sent to you as a series of images, each "
+        f"representing a page of the PDF. The images will be accompanied by text messages indicating the name of "
+        f"the PDF file, the total number of pages, and the page number of each image. When responding to questions "
+        f"about a PDF, make sure to reference the specific pages and content of the PDF based on the provided images "
+        f"and their associated page numbers. If a user asks about a PDF without providing the file, let them know "
+        f"that you need the PDF file to be able to assist them effectively."
+    )
 
 
 def sanitize_username(username):
@@ -277,11 +285,28 @@ def split_message(msg, max_length=4000):
 def handle_text_generation(
         last_message, messages, channel_id, root_id, sender_name, links
 ):
+    pdf_files_provided = any(
+        isinstance(msg, dict) and msg.get("type") == "text" and "This is PDF named" in msg.get("text", "")
+        for msg in messages
+    )
+    # Modify the system instructions based on whether PDF files were provided or not
+    if pdf_files_provided:
+        system_instructions = (
+            f"{get_system_instructions()}\n\n"
+            f"PDF files have been provided in this conversation. When responding, make sure to reference the "
+            f"specific pages and content of the PDFs based on the images and their associated page numbers."
+        )
+    else:
+        system_instructions = (
+            f"{get_system_instructions()}\n\n"
+            f"No PDF files have been provided in this conversation. If the user asks about a PDF, let them know "
+            f"that you need the PDF file to be able to assist them effectively."
+        )
     # Send the messages to the AI API
     response = ai_client.messages.create(
         model=model,
         max_tokens=max_tokens,
-        system=get_system_instructions(),
+        system=system_instructions,
         messages=messages,
         timeout=timeout,
         temperature=temperature,
@@ -403,7 +428,6 @@ async def message_handler(event):
 
                     messages.append(message_obj)
                 # Retrieve the thread context
-                thread_files = []  # to hold files from thread history
                 chatbot_invoked = False
                 if root_id:
                     thread = driver.posts.get_thread(root_id)
@@ -461,14 +485,20 @@ async def message_handler(event):
                         for file_id in file_ids:
                             try:
                                 file_info = driver.files.get_file(file_id)
+                                file_name = driver.files.get_file_metadata(file_id)["name"]
                                 logger.info(f"Processing file: {file_info.headers['Content-Disposition']}")
 
                                 if file_info.headers['Content-Type'] == 'application/pdf':
-                                    pdf_messages = process_pdf(file_info)
+                                    pdf_messages = process_pdf(BytesIO(file_info.content), file_name)
                                     if pdf_messages:
                                         file_messages.extend(pdf_messages)
                                 elif file_info.headers['Content-Type'].startswith('image/'):
                                     image_base64 = base64.b64encode(file_info.content).decode("utf-8")
+                                    file_messages.append({
+                                        "type": "text",
+                                        "text": f"This is image have name of {file_name} and the type of this image is"
+                                        f"{file_info.headers['Content-Type']}"
+                                    })
                                     file_messages.append({
                                         "type": "image",
                                         "source": {
@@ -485,7 +515,6 @@ async def message_handler(event):
 
                         if file_messages:
                             messages.append({"role": "user", "content": file_messages})
-                            logger.info(f"Sending file messages to AI: {file_messages}")
                     else:
                         logger.info("No file_ids found in the post")
                     links = re.findall(
@@ -512,6 +541,21 @@ async def message_handler(event):
                                         continue
 
                                     content_type = response.headers.get("content-type", "").lower()
+                                    content_disposition = response.headers.get("content-disposition")
+                                    file_name = None
+
+                                    if content_disposition:
+                                        # Pokus o získání názvu souboru z hlavičky Content-Disposition
+                                        cd_params = content_disposition.split(";")
+                                        for param in cd_params:
+                                            param = param.strip()
+                                            if param.startswith("filename="):
+                                                file_name = param[9:].strip('"')
+                                                break
+
+                                    if not file_name:
+                                        # Pokud název souboru není v hlavičce Content-Disposition, získejte ho z URL
+                                        file_name = os.path.basename(urlparse(final_url).path)
                                     if content_type == "application/pdf":
                                         try:
                                             pdf_content = BytesIO()
@@ -522,7 +566,7 @@ async def message_handler(event):
                                                     extracted_text += ("*WEBSITE SIZE EXCEEDED THE MAXIMUM LIMIT FOR "
                                                                        "THE CHATBOT, WARN THE CHATBOT USER*")
                                                     raise Exception("Response size exceeds the maximum limit")
-                                            pdf_messages = process_pdf(pdf_content)
+                                            pdf_messages = process_pdf(pdf_content, file_name)
                                             if pdf_messages:
                                                 file_messages.extend(pdf_messages)
                                         except Exception as e:
@@ -621,6 +665,11 @@ async def message_handler(event):
                                         image_data_base64 = base64.b64encode(
                                             resized_image_data
                                         ).decode("utf-8")
+                                        image_messages.append({
+                                            "type": "text",
+                                            "text": f"This is image have name of {file_name} and the type of this image is"
+                                                    f"{content_type}"
+                                        })
                                         image_messages.append(
                                             {
                                                 "type": "image",
@@ -730,9 +779,14 @@ def get_message_files(thread_post):
         file_ids = thread_post["file_ids"]
         for file_id in file_ids:
             file_info = driver.files.get_file(file_id)
+            file_name = driver.files.get_file_metadata(file_id)["name"]
             content_type = file_info.headers['Content-Type']
             if content_type.startswith('image/'):
                 image_base64 = base64.b64encode(file_info.content).decode("utf-8")
+                file_messages.append({
+                    "type": "text",
+                    "text": f"tis image have name of {file_name} and the type of this image is {content_type}"
+                })
                 file_messages.append({
                     "type": "image",
                     "source": {
@@ -742,7 +796,7 @@ def get_message_files(thread_post):
                     },
                 })
             elif content_type == 'application/pdf':
-                pdf_messages = process_pdf(BytesIO(file_info.content))
+                pdf_messages = process_pdf(BytesIO(file_info.content), file_name)
                 if pdf_messages:
                     file_messages.extend(pdf_messages)
     return file_messages
