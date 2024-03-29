@@ -18,8 +18,9 @@ from anthropic import Anthropic
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from mattermostdriver.driver import Driver
-from RestrictedPython import compile_restricted, safe_builtins, limited_builtins
 from pdf_processing import process_pdf
+import re
+import subprocess
 
 # loading variables from .env file
 load_dotenv()
@@ -88,7 +89,7 @@ ai_client = Anthropic(api_key=api_key)
 thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 
-def get_channel_history(channel_id, limit=5):
+def get_channel_history(channel_id, limit=50):
     try:
         # Fetch the latest 'limit' posts from the channel
         posts = driver.posts.get_posts_for_channel(channel_id, params={'per_page': limit, 'page': 0})
@@ -140,7 +141,7 @@ def get_system_instructions():
         f"and their associated page numbers. If a user asks about a PDF without providing the file, let them know "
         f"that you need the PDF file to be able to assist them effectively.\n\n"
         f"If you provide a Python code block in your response, the code will be executed automatically after your "
-        f"response is sent. You don't need to include the expected output of the code in your response, as the actual "
+        f"response is sent. You can't include the expected output of the code in your response, as the actual "
         f"output will be appended to the message. Focus on providing clear and concise code without worrying about "
         f"the specific output."
     )
@@ -324,15 +325,17 @@ def handle_text_generation(
     for block in content_blocks:
         if block.type == "text":
             response_text += block.text
-        # Check if the response contains a Python code block
-        python_code_block = re.findall(r"```python\n(.*?)\n```", response_text, re.DOTALL)
 
-        if python_code_block:
-            # Execute the Python code and get the output
-            code_output = execute_python_code(python_code_block[0])
+    # Check if the response contains a Python code block
 
-            # Append the code output to the response text
-            response_text += f"\n\nOutput of the Python script:\n{code_output}"
+    python_code_block = re.findall(r"```python\n(.*?)\n```", response_text, re.DOTALL)
+    if python_code_block:
+
+        # Execute the Python code and get the output
+        code_output = execute_python_code(python_code_block[0])
+
+        # Append the code output to the response text
+        response_text += f"\n\nOutput of the Python script:\n{code_output}"
 
     # Failsafe: Remove all blocks containing [CONTEXT
     response_text = re.sub(r"(?s)\[CONTEXT.*?]", "", response_text).strip()
@@ -355,30 +358,25 @@ def handle_text_generation(
 
 def execute_python_code(code):
     try:
-        # Compile the code with restricted access
-        byte_code = compile_restricted(code, filename='<inline code>', mode='exec')
+        # Write the code to a temporary file
+        with open("temp_script.py", "w") as file:
+            file.write(code)
 
-        # Create a restricted environment
-        restricted_globals = {
-            '__builtins__': {
-                **safe_builtins,
-                **limited_builtins,
-            }
-        }
+        # Execute the Python script in a subprocess
+        result = subprocess.run(["python", "temp_script.py"], capture_output=True, text=True)
 
-        # Remove file-related built-ins
-        restricted_globals['__builtins__'].pop('open', None)
-
-        # Execute the code in the restricted environment
-        exec(byte_code, restricted_globals)
-
-        # Capture the printed output
-        output = restricted_globals.get('_print_output', '')
-
-        return output
+        # Check if the script executed successfully
+        if result.returncode == 0:
+            return result.stdout
+        else:
+            return f"Error: {result.stderr}"
 
     except Exception as e:
         return f"Error: {str(e)}"
+
+    finally:
+        # Clean up the temporary file
+        os.remove("temp_script.py")
 
 
 def process_message(last_message, messages, channel_id, root_id, sender_name, links):
